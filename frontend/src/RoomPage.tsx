@@ -160,7 +160,15 @@ function useCamera() {
   useEffect(() => {
     if (!navigator.mediaDevices?.getUserMedia) { setErr('摄像头需要 HTTPS 或 localhost'); return; }
     let stream: MediaStream | null = null;
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+    // 优先 4K → 2K → 1080p，设备不支持则自动降级
+    navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: 'environment',
+        width: { ideal: 3840, min: 640 },
+        height: { ideal: 2160, min: 480 },
+        frameRate: { ideal: 30 },
+      },
+    })
       .then((s) => { stream = s; if (videoRef.current) videoRef.current.srcObject = s; setHasCam(true); })
       .catch((e) => setErr(e.message || '无法访问摄像头'));
     return () => { if (stream) stream.getTracks().forEach((t) => t.stop()); };
@@ -322,14 +330,19 @@ export default function RoomPage() {
           )}
         </div>
         {timer.running && (
-          <div style={S.overlayTimer}>
-            <span style={{
-              fontSize: 96, fontWeight: timer.paused ? 600 : 800,
-              color: timer.paused ? '#ff9f0a' : '#fff',
-              textShadow: '0 4px 24px rgba(0,0,0,0.5)',
-            }}>
-              {timer.paused ? '⏸' : timer.seconds}
-            </span>
+          <div style={{
+            position: 'absolute', top: 20, right: 20,
+            padding: timer.paused ? '12px 24px' : '10px 28px',
+            borderRadius: 999,
+            background: timer.paused ? 'rgba(255,159,10,0.9)' : 'rgba(0,0,0,0.65)',
+            backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)',
+            color: '#fff', fontSize: timer.paused ? 20 : 36,
+            fontWeight: 700, fontVariantNumeric: 'tabular-nums',
+            lineHeight: 1.2,
+            boxShadow: '0 4px 20px rgba(0,0,0,0.3)',
+            pointerEvents: 'none', zIndex: 10,
+          }}>
+            {timer.paused ? '⏸ 暂停' : timer.seconds + 's'}
           </div>
         )}
       </div>
@@ -406,12 +419,7 @@ const S: Record<string, React.CSSProperties> = {
     border: '1px solid var(--border)', fontSize: 14,
     transition: 'all var(--transition)',
   },
-  main: { flex: 1, display: 'flex', flexDirection: 'column', background: '#000', position: 'relative' },
-  videoArea: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' },
-  video: { maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' },
-  overlayTimer: {
-    position: 'absolute', inset: 0,
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    background: 'rgba(0,0,0,0.35)', pointerEvents: 'none',
-  },
+  main: { flex: 1, display: 'flex', flexDirection: 'column', background: '#000', position: 'relative', overflow: 'hidden' },
+  videoArea: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
+  video: { width: '100%', height: '100%', objectFit: 'cover' },
 };
