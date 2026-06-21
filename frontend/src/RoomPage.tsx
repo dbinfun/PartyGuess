@@ -2,7 +2,7 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import QRCode from 'qrcode';
 import { useTheme } from './theme';
-import { BuzzerEntry, connectAdmin, clearBuzzers } from './api';
+import { BuzzerEntry, PlayerInfo, connectAdmin, clearBuzzers } from './api';
 
 // ============================================================
 // QR 弹窗
@@ -20,17 +20,17 @@ function QRModal({ url, onClose }: { url: string; onClose: () => void }) {
   }, [url]);
 
   return (
-    <div style={qrs.overlay} onClick={onClose}>
-      <div style={qrs.card} onClick={(e) => e.stopPropagation()}>
+    <div style={modal.overlay} onClick={onClose}>
+      <div style={modal.card} onClick={(e) => e.stopPropagation()}>
         <canvas ref={canvasRef} />
-        <p style={qrs.url}>{url}</p>
-        <button style={qrs.btn} onClick={onClose}>关闭</button>
+        <p style={modal.url}>{url}</p>
+        <button style={modal.btn} onClick={onClose}>关闭</button>
       </div>
     </div>
   );
 }
 
-const qrs: Record<string, React.CSSProperties> = {
+const modal: Record<string, React.CSSProperties> = {
   overlay: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 },
   card: { background: '#fff', borderRadius: 24, padding: 32, textAlign: 'center', maxWidth: 340, boxShadow: '0 20px 60px rgba(0,0,0,0.2)' },
   url: { marginTop: 16, color: '#333', fontSize: 12, wordBreak: 'break-all', fontFamily: 'var(--font-mono)' },
@@ -38,44 +38,114 @@ const qrs: Record<string, React.CSSProperties> = {
 };
 
 // ============================================================
-// 倒计时 Hook
+// 玩家列表弹窗
+// ============================================================
+
+function PlayersModal({ players, onClose }: { players: PlayerInfo[]; onClose: () => void }) {
+  return (
+    <div style={modal.overlay} onClick={onClose}>
+      <div style={{ ...modal.card, minWidth: 300 }} onClick={(e) => e.stopPropagation()}>
+        <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 4, color: '#333' }}>👥 已加入玩家</h3>
+        <p style={{ fontSize: 12, color: '#999', marginBottom: 16 }}>当前 {players.length} 人在线</p>
+
+        {players.length === 0 ? (
+          <p style={{ color: '#bbb', fontSize: 14, padding: 20 }}>暂无玩家加入</p>
+        ) : (
+          <div style={{ maxHeight: 280, overflowY: 'auto' }}>
+            {players.map((p, i) => (
+              <div key={p.userId} style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '10px 14px', marginBottom: 4,
+                background: '#f5f5f7', borderRadius: 12, fontSize: 14, color: '#333',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <div style={{
+                    width: 26, height: 26, borderRadius: '50%', lineHeight: '26px',
+                    textAlign: 'center', fontSize: 11, fontWeight: 700,
+                    background: '#0071e3', color: '#fff',
+                  }}>{i + 1}</div>
+                  <span style={{ fontWeight: 500 }}>{p.name}</span>
+                </div>
+                <span style={{ fontSize: 11, color: '#999', fontFamily: 'var(--font-mono)' }}>
+                  {new Date(p.joinAt).toLocaleTimeString()}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <button style={modal.btn} onClick={onClose}>关闭</button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// 倒计时 Hook（支持暂停/继续/停止）
 // ============================================================
 
 const TIMER_OPTIONS = [15, 30, 45, 60, 90];
 
+interface TimerState {
+  seconds: number;
+  active: number | null;    // 选中的时长按钮
+  running: boolean;         // 正在倒计时
+  paused: boolean;          // 已暂停
+}
+
 function useTimer(onCountdownChange: (active: boolean) => void) {
-  const [seconds, setSeconds] = useState(0);
-  const [active, setActive] = useState<number | null>(null);
+  const [st, setSt] = useState<TimerState>({ seconds: 0, active: null, running: false, paused: false });
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const clearTimer = useCallback(() => {
+    if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+  }, []);
+
+  // start: 开始或重新开始倒计时
   const start = useCallback((sec: number) => {
-    if (intervalRef.current) clearInterval(intervalRef.current);
-    setSeconds(sec);
-    setActive(sec);
+    clearTimer();
+    setSt({ seconds: sec, active: sec, running: true, paused: false });
     onCountdownChange(true);
     intervalRef.current = setInterval(() => {
-      setSeconds((prev) => {
-        if (prev <= 1) {
-          if (intervalRef.current) clearInterval(intervalRef.current);
-          setActive(null);
-          onCountdownChange(false);
-          return 0;
+      setSt((prev) => {
+        if (prev.paused) return prev; // 暂停中不减少
+        if (prev.seconds <= 1) {
+          clearTimer();
+          const next: TimerState = { seconds: 0, active: null, running: false, paused: false };
+          setTimeout(() => onCountdownChange(false), 0);
+          return next;
         }
-        return prev - 1;
+        return { ...prev, seconds: prev.seconds - 1 };
       });
     }, 1000);
-  }, [onCountdownChange]);
+  }, [clearTimer, onCountdownChange]);
 
+  // pause: 暂停倒计时（抢答窗口保持打开）
+  const pause = useCallback(() => {
+    setSt((prev) => {
+      if (!prev.running || prev.paused) return prev;
+      return { ...prev, paused: true };
+    });
+  }, []);
+
+  // resume: 从暂停恢复
+  const resume = useCallback(() => {
+    setSt((prev) => {
+      if (!prev.running || !prev.paused) return prev;
+      return { ...prev, paused: false };
+    });
+  }, []);
+
+  // stop: 停止并复位（关闭抢答窗口）
   const stop = useCallback(() => {
-    if (intervalRef.current) clearInterval(intervalRef.current);
-    setSeconds(0);
-    setActive(null);
+    clearTimer();
+    setSt({ seconds: 0, active: null, running: false, paused: false });
     onCountdownChange(false);
-  }, [onCountdownChange]);
+  }, [clearTimer, onCountdownChange]);
 
-  useEffect(() => () => { if (intervalRef.current) clearInterval(intervalRef.current); }, []);
+  useEffect(() => () => clearTimer(), [clearTimer]);
 
-  return { seconds, active, start, stop };
+  return { ...st, start, pause, resume, stop };
 }
 
 // ============================================================
@@ -111,31 +181,29 @@ export default function RoomPage() {
   const secret = sessionStorage.getItem(`secret_${roomId}`) || '';
 
   const [buzzers, setBuzzers] = useState<BuzzerEntry[]>([]);
+  const [players, setPlayers] = useState<PlayerInfo[]>([]);
   const [showQR, setShowQR] = useState(false);
+  const [showPlayers, setShowPlayers] = useState(false);
   const [wsSend, setWsSend] = useState<((active: boolean) => void) | null>(null);
 
   const camera = useCamera();
 
-  // 倒计时 → WebSocket 通知后端
   const handleCountdownChange = useCallback((active: boolean) => {
     if (wsSend) wsSend(active);
   }, [wsSend]);
 
   const timer = useTimer(handleCountdownChange);
-
   const playUrl = `${location.protocol}//${location.host}/play/${roomId}?secret=${secret}`;
 
   // WebSocket
   useEffect(() => {
     if (!roomId || !secret) return;
     const { sendCountdown, close } = connectAdmin(roomId, secret, {
-      onUpdate: (list) => setBuzzers(list),
-      onState: (list, cdActive) => {
+      onUpdate: (list, plist) => { setBuzzers(list); setPlayers(plist); },
+      onState: (list, plist, cdActive) => {
         setBuzzers(list);
-        // 如果后端倒计时状态与本地不一致（如页面刷新），同步
-        if (!cdActive && timer.active !== null) {
-          timer.stop();
-        }
+        setPlayers(plist);
+        if (!cdActive && timer.running) timer.stop();
       },
     });
     setWsSend(() => sendCountdown);
@@ -151,6 +219,8 @@ export default function RoomPage() {
     if (!window.confirm('确认清空抢答列表？')) return;
     try { await clearBuzzers(roomId!, adminKey); setBuzzers([]); } catch { alert('清空失败'); }
   };
+
+  const isTimerActive = timer.running;
 
   return (
     <div style={S.wrap}>
@@ -170,24 +240,52 @@ export default function RoomPage() {
         <div style={S.sectionLabel}>倒计时</div>
         <div style={S.timerRow}>
           {TIMER_OPTIONS.map((sec) => (
-            <button key={sec} style={timerBtnCss(timer.active === sec)}
-              onClick={() => timer.start(sec)}>{sec}s</button>
+            <button key={sec} style={timerBtnCss(timer.active === sec && !timer.paused)}
+              onClick={() => timer.start(sec)} disabled={isTimerActive}>
+              {sec}s
+            </button>
           ))}
-          <button style={timerBtnCss(false, true)} onClick={timer.stop}>■</button>
         </div>
+
+        {/* 倒计时显示 */}
         <div style={S.timerDisplay}>
-          <span style={{ fontSize: 48, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
-            {timer.seconds > 0 ? timer.seconds : '--'}
+          <span style={{
+            fontSize: 48, fontWeight: timer.paused ? 600 : 700,
+            color: timer.paused ? 'var(--warning)' : 'var(--text-primary)',
+            fontVariantNumeric: 'tabular-nums',
+          }}>
+            {timer.running ? timer.seconds : '--'}
           </span>
           <span style={{ fontSize: 18, fontWeight: 500, color: 'var(--text-tertiary)', marginLeft: 4 }}>
-            {timer.seconds > 0 ? 's' : ''}
+            {timer.running ? (timer.paused ? '⏸' : 's') : ''}
           </span>
         </div>
 
+        {/* 暂停 / 继续 / 停止 —— 暂停是主按钮 */}
+        {isTimerActive ? (
+          <div style={S.actionRow}>
+            {timer.paused ? (
+              <button style={S.btnPrimary} onClick={timer.resume}>▶ 继续</button>
+            ) : (
+              <button style={S.btnWarning} onClick={timer.pause}>⏸ 暂停</button>
+            )}
+            <button style={S.btnDanger} onClick={timer.stop}>■ 停止</button>
+          </div>
+        ) : (
+          <div style={S.actionRow}>
+            <div style={{ flex: 1, textAlign: 'center', padding: '10px 0', fontSize: 12, color: 'var(--text-tertiary)' }}>
+              点击上方时长开始
+            </div>
+          </div>
+        )}
+
         {/* 操作按钮 */}
-        <div style={S.actionRow}>
-          <button style={S.btnPrimary} onClick={() => setShowQR(true)}>📱 二维码</button>
-          <button style={S.btnDanger} onClick={handleClear}>🗑 清空列表</button>
+        <div style={{ ...S.actionRow, paddingTop: 4 }}>
+          <button style={S.btnSecondary} onClick={() => setShowQR(true)}>📱 二维码</button>
+          <button style={S.btnSecondary} onClick={() => setShowPlayers(true)}>👥 在线 ({players.length})</button>
+        </div>
+        <div style={{ ...S.actionRow, paddingTop: 0 }}>
+          <button style={S.btnDangerOutline} onClick={handleClear}>🗑 清空列表</button>
         </div>
 
         {/* 抢答列表 */}
@@ -223,16 +321,21 @@ export default function RoomPage() {
             </div>
           )}
         </div>
-        {timer.seconds > 0 && (
+        {timer.running && (
           <div style={S.overlayTimer}>
-            <span style={{ fontSize: 96, fontWeight: 800, color: '#fff', textShadow: '0 4px 24px rgba(0,0,0,0.5)' }}>
-              {timer.seconds}
+            <span style={{
+              fontSize: 96, fontWeight: timer.paused ? 600 : 800,
+              color: timer.paused ? '#ff9f0a' : '#fff',
+              textShadow: '0 4px 24px rgba(0,0,0,0.5)',
+            }}>
+              {timer.paused ? '⏸' : timer.seconds}
             </span>
           </div>
         )}
       </div>
 
       {showQR && <QRModal url={playUrl} onClose={() => setShowQR(false)} />}
+      {showPlayers && <PlayersModal players={players} onClose={() => setShowPlayers(false)} />}
     </div>
   );
 }
@@ -241,12 +344,12 @@ export default function RoomPage() {
 // 样式
 // ============================================================
 
-const timerBtnCss = (active: boolean, danger = false): React.CSSProperties => ({
+const timerBtnCss = (active: boolean): React.CSSProperties => ({
   flex: '1 0 auto', padding: '8px 0', fontSize: 13, fontWeight: 600,
-  border: active ? '2px solid var(--accent)' : danger ? '2px solid var(--danger)' : '1.5px solid var(--border-strong)',
+  border: active ? '2px solid var(--accent)' : '1.5px solid var(--border-strong)',
   borderRadius: 'var(--radius-sm)', cursor: 'pointer',
-  background: active ? 'var(--accent-dim)' : danger ? 'transparent' : 'var(--bg-tertiary)',
-  color: active ? 'var(--accent)' : danger ? 'var(--danger)' : 'var(--text-secondary)',
+  background: active ? 'var(--accent-dim)' : 'var(--bg-tertiary)',
+  color: active ? 'var(--accent)' : 'var(--text-secondary)',
   minWidth: 48, textAlign: 'center',
 });
 
@@ -274,12 +377,24 @@ const S: Record<string, React.CSSProperties> = {
   sectionLabel: { fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-tertiary)', padding: '16px 20px 8px' },
   timerRow: { display: 'flex', gap: 6, padding: '0 20px', flexWrap: 'wrap' },
   timerDisplay: { textAlign: 'center', padding: '12px 0 4px', color: 'var(--text-primary)', fontVariantNumeric: 'tabular-nums' },
-  actionRow: { display: 'flex', gap: 8, padding: '16px 20px' },
+  actionRow: { display: 'flex', gap: 8, padding: '12px 20px' },
   btnPrimary: {
-    flex: 1, padding: '10px 0', fontSize: 13, fontWeight: 600, border: 'none',
+    flex: 1, padding: '10px 0', fontSize: 14, fontWeight: 600, border: 'none',
     borderRadius: 'var(--radius-sm)', background: 'var(--accent)', color: '#fff', cursor: 'pointer',
   },
+  btnWarning: {
+    flex: 1, padding: '10px 0', fontSize: 14, fontWeight: 600, border: 'none',
+    borderRadius: 'var(--radius-sm)', background: 'var(--warning)', color: '#fff', cursor: 'pointer',
+  },
   btnDanger: {
+    flex: 1, padding: '10px 0', fontSize: 14, fontWeight: 600, border: 'none',
+    borderRadius: 'var(--radius-sm)', background: 'var(--danger)', color: '#fff', cursor: 'pointer',
+  },
+  btnSecondary: {
+    flex: 1, padding: '10px 0', fontSize: 13, fontWeight: 600, border: '1.5px solid var(--border-strong)',
+    borderRadius: 'var(--radius-sm)', background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', cursor: 'pointer',
+  },
+  btnDangerOutline: {
     flex: 1, padding: '10px 0', fontSize: 13, fontWeight: 600, border: '1.5px solid var(--danger)',
     borderRadius: 'var(--radius-sm)', background: 'transparent', color: 'var(--danger)', cursor: 'pointer',
   },
