@@ -474,7 +474,8 @@ func broadcastToPlayers(room *Room, msg map[string]interface{}) {
 
 // spaFileServer 包装 http.FileServer，对不存在的路径返回 index.html（SPA 回退）
 type spaFileServer struct {
-	fs http.Handler
+	fs   http.Handler
+	root string // 静态文件根目录，用于 ServeFile 回退
 }
 
 func (s *spaFileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -492,10 +493,12 @@ func (s *spaFileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rec := &spaResponseWriter{ResponseWriter: w, status: 200}
 	s.fs.ServeHTTP(rec, r)
 	if rec.status == 404 {
-		// 重写路径为 /index.html
-		r2 := *r
-		r2.URL.Path = "/index.html"
-		s.fs.ServeHTTP(w, &r2)
+		// 回退到 index.html（SPA 路由）。
+		// 用原始 r（保留原始 URL Path），因为 http.ServeFile 内部
+		// serveFile 会检查 r.URL.Path 是否以 "/index.html" 结尾，
+		// 若是则无条件 301 → "./"，造成路径段丢失 + 无限重定向。
+		// 保留原始 URL Path 可绕过该检查，文件解析走磁盘路径不受影响。
+		http.ServeFile(w, r, filepath.Join(s.root, "index.html"))
 	}
 }
 
@@ -594,7 +597,7 @@ func main() {
 	// 静态文件 + SPA 回退
 	staticDir := findStaticDir()
 	if staticDir != "" {
-		mux.Handle("/", &spaFileServer{fs: http.FileServer(http.Dir(staticDir))})
+		mux.Handle("/", &spaFileServer{fs: http.FileServer(http.Dir(staticDir)), root: staticDir})
 	} else {
 		log.Println("⚠ 未找到前端静态文件，仅提供 API 服务")
 		log.Println("  请先构建前端: cd frontend && npm run build")
