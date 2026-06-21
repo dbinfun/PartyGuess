@@ -389,10 +389,18 @@ func findStaticDir() string {
 		candidates = append(candidates, d)
 	}
 	candidates = append(candidates,
-		"../frontend/dist",   // 从 server/ 运行
-		"./frontend/dist",    // 从项目根运行
-		"../../frontend/dist", // 从 server/cmd/ 等深层运行
+		"./frontend/dist",    // 从项目根运行（开发 + CI 产物）
+		"../frontend/dist",   // 从 server/ 运行（开发）
 	)
+
+	// 也查找二进制同目录下的 dist（CI 发布包结构）
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(exeDir, "frontend", "dist"),
+			filepath.Join(exeDir, "dist"),
+		)
+	}
 
 	for _, d := range candidates {
 		abs, _ := filepath.Abs(d)

@@ -1,0 +1,95 @@
+name: Build & Package
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  build-frontend:
+    name: Build Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: cd frontend && npm ci
+
+      - name: TypeScript check
+        run: cd frontend && npx tsc --noEmit
+
+      - name: Build
+        run: cd frontend && npm run build
+
+      - name: Upload frontend dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+          retention-days: 1
+
+  build-backend:
+    name: Build Go Backend (${{ matrix.os }})
+    needs: build-frontend
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            ext: ""
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            ext: ".exe"
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            ext: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: server/frontend/dist
+
+      - name: Download Go modules
+        run: cd server && go mod download
+
+      - name: Build binary
+        run: |
+          cd server
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o buzzer-server${{ matrix.ext }} .
+
+      - name: Package release
+        shell: bash
+        run: |
+          mkdir -p release/frontend
+          cp -r server/frontend/dist release/frontend/
+          cp server/buzzer-server${{ matrix.ext }} release/
+          cd release
+          tar -czf ../buzzer-server-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz .
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: buzzer-server-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: buzzer-server-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+          retention-days: 7
