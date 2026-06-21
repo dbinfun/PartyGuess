@@ -32,17 +32,18 @@ type PlayerInfo struct {
 }
 
 type Room struct {
-	ID              string        `json:"id"`
-	Secret          string        `json:"secret"` // 随机字符串，用于 URL 安全
-	CreatedAt       int64         `json:"createdAt"`
-	Buzzers         []BuzzerEntry `json:"buzzers"`
-	CountdownActive bool          `json:"countdownActive"`
-	Players         []PlayerInfo  `json:"players"`
+	ID              string            `json:"id"`
+	Secret          string            `json:"secret"` // 随机字符串，用于 URL 安全
+	CreatedAt       int64             `json:"createdAt"`
+	Buzzers         []BuzzerEntry     `json:"buzzers"`
+	CountdownActive bool              `json:"countdownActive"`
+	Players         []PlayerInfo      `json:"players"`
+	Strokes         []json.RawMessage `json:"-"` // 笔画历史（最多 2000 条）
 	mu              sync.RWMutex
-	adminClients    map[*websocket.Conn]bool          // 管理端 WebSocket 连接
-	playerClients   map[*websocket.Conn]bool          // 玩家 WebSocket 连接
-	drawerClients   map[*websocket.Conn]bool          // 画手 WebSocket 连接
-	playerInfo      map[*websocket.Conn]*PlayerInfo   // 玩家连接 → 信息
+	adminClients    map[*websocket.Conn]bool        // 管理端 WebSocket 连接
+	playerClients   map[*websocket.Conn]bool        // 玩家 WebSocket 连接
+	drawerClients   map[*websocket.Conn]bool        // 画手 WebSocket 连接
+	playerInfo      map[*websocket.Conn]*PlayerInfo // 玩家连接 → 信息
 }
 
 type RoomStore struct {
@@ -94,6 +95,7 @@ func createRoom(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:     time.Now().UnixMilli(),
 		Buzzers:       make([]BuzzerEntry, 0),
 		Players:       make([]PlayerInfo, 0),
+		Strokes:       make([]json.RawMessage, 0, 2000),
 		adminClients:  make(map[*websocket.Conn]bool),
 		playerClients: make(map[*websocket.Conn]bool),
 		drawerClients: make(map[*websocket.Conn]bool),
@@ -240,13 +242,17 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		room.adminClients[conn] = true
 		room.mu.Unlock()
 
-		// 发送当前状态
+		// 发送当前状态 + 回放历史笔画
 		room.mu.RLock()
 		sendJSON(conn, map[string]interface{}{
-			"type":             "state",
-			"buzzers":          room.Buzzers,
-			"players":          room.Players,
-			"countdownActive":  room.CountdownActive,
+			"type":            "state",
+			"buzzers":         room.Buzzers,
+			"players":         room.Players,
+			"countdownActive": room.CountdownActive,
+		})
+		sendJSON(conn, map[string]interface{}{
+			"type":    "replay",
+			"strokes": room.Strokes,
 		})
 		room.mu.RUnlock()
 
@@ -277,17 +283,17 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 				// 广播给所有玩家
 				broadcastToPlayers(room, map[string]interface{}{
-					"type":             "countdown",
-					"countdownActive":  active,
+					"type":            "countdown",
+					"countdownActive": active,
 				})
 
 				// 同步给管理员
 				room.mu.RLock()
 				sendJSON(conn, map[string]interface{}{
-					"type":             "state",
-					"buzzers":          room.Buzzers,
-					"players":          room.Players,
-					"countdownActive":  room.CountdownActive,
+					"type":            "state",
+					"buzzers":         room.Buzzers,
+					"players":         room.Players,
+					"countdownActive": room.CountdownActive,
 				})
 				room.mu.RUnlock()
 			}
@@ -298,7 +304,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		room.mu.Unlock()
 
 	case "drawer":
-		// 画手连接：注册并中继笔画到管理员
+		// 画手连接：注册、存储笔画历史、中继到管理员
 		room.mu.Lock()
 		room.drawerClients[conn] = true
 		room.mu.Unlock()
@@ -308,7 +314,28 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				break
 			}
-			// 直接中继消息给所有管理客户端
+
+			// 解析消息类型以决定存储策略
+			var meta struct {
+				Type string `json:"type"`
+			}
+			json.Unmarshal(msg, &meta)
+
+			room.mu.Lock()
+			switch meta.Type {
+			case "stroke":
+				// 存储笔画（上限 2000，超出丢弃最旧的）
+				if len(room.Strokes) >= 2000 {
+					room.Strokes = room.Strokes[1:]
+				}
+				room.Strokes = append(room.Strokes, msg)
+			case "clearCanvas":
+				// 清空笔画历史
+				room.Strokes = room.Strokes[:0]
+			}
+			room.mu.Unlock()
+
+			// 中继给所有管理客户端
 			room.mu.RLock()
 			for c := range room.adminClients {
 				c.WriteMessage(websocket.TextMessage, msg)
@@ -469,6 +496,35 @@ func broadcastToPlayers(room *Room, msg map[string]interface{}) {
 }
 
 // ============================================================
+// 房间过期清理
+// ============================================================
+
+func startRoomCleaner(interval time.Duration, maxAge time.Duration) {
+	go func() {
+		for {
+			time.Sleep(interval)
+			now := time.Now().UnixMilli()
+			store.mu.Lock()
+			for id, room := range store.rooms {
+				room.mu.RLock()
+				// 检查是否有活跃连接
+				hasActivity := len(room.adminClients) > 0 ||
+					len(room.playerClients) > 0 ||
+					len(room.drawerClients) > 0
+				age := now - room.CreatedAt
+				room.mu.RUnlock()
+
+				if !hasActivity && age > maxAge.Milliseconds() {
+					log.Printf("清理过期房间: %s (age=%v)", id, time.Duration(age)*time.Millisecond)
+					delete(store.rooms, id)
+				}
+			}
+			store.mu.Unlock()
+		}
+	}()
+}
+
+// ============================================================
 // 静态文件服务（SPA fallback）
 // ============================================================
 
@@ -534,8 +590,8 @@ func findStaticDir() string {
 		candidates = append(candidates, d)
 	}
 	candidates = append(candidates,
-		"./frontend/dist",    // 从项目根运行（开发 + CI 产物）
-		"../frontend/dist",   // 从 server/ 运行（开发）
+		"./frontend/dist",  // 从项目根运行（开发 + CI 产物）
+		"../frontend/dist", // 从 server/ 运行（开发）
 	)
 
 	// 也查找二进制同目录下的 dist（CI 发布包结构）
@@ -569,6 +625,9 @@ func main() {
 	}
 
 	log.Printf("Admin Key: %s", adminKey)
+
+	// 启动房间过期清理：每 5 分钟检查，超过 1 小时无人活动的房间删除
+	startRoomCleaner(5*time.Minute, 1*time.Hour)
 
 	mux := http.NewServeMux()
 

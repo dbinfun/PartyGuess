@@ -57,6 +57,7 @@ export interface AdminWSCallbacks {
   onState: (buzzers: BuzzerEntry[], players: PlayerInfo[], countdownActive: boolean) => void;
   onStroke?: (points: {x:number;y:number}[], color: string, size: number, tool: string) => void;
   onClearCanvas?: () => void;
+  onReplay?: (strokes: any[]) => void;
 }
 
 export function connectAdmin(
@@ -74,6 +75,7 @@ export function connectAdmin(
       if (data.type === 'state') cbs.onState(data.buzzers || [], data.players || [], !!data.countdownActive);
       if (data.type === 'stroke' && cbs.onStroke) cbs.onStroke(data.points || [], data.color, data.size, data.tool);
       if (data.type === 'clearCanvas' && cbs.onClearCanvas) cbs.onClearCanvas();
+      if (data.type === 'replay' && cbs.onReplay) cbs.onReplay(data.strokes || []);
     } catch { /* ignore */ }
   };
 

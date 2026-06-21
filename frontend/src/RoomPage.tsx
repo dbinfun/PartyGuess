@@ -154,13 +154,13 @@ function useTimer(onCountdownChange: (active: boolean) => void) {
 
 function useCamera() {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
   const [hasCam, setHasCam] = useState(false);
   const [err, setErr] = useState('');
 
+  // 获取摄像头流
   useEffect(() => {
     if (!navigator.mediaDevices?.getUserMedia) { setErr('摄像头需要 HTTPS 或 localhost'); return; }
-    let stream: MediaStream | null = null;
-    // 优先 4K → 2K → 1080p，设备不支持则自动降级
     navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: 'environment',
@@ -168,11 +168,25 @@ function useCamera() {
         height: { ideal: 2160, min: 480 },
         frameRate: { ideal: 30 },
       },
+      audio: false, // 不采集音频
     })
-      .then((s) => { stream = s; if (videoRef.current) videoRef.current.srcObject = s; setHasCam(true); })
+      .then((stream) => { streamRef.current = stream; setHasCam(true); })
       .catch((e) => setErr(e.message || '无法访问摄像头'));
-    return () => { if (stream) stream.getTracks().forEach((t) => t.stop()); };
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+      }
+    };
   }, []);
+
+  // 当 video 元素渲染到 DOM 后再绑定 srcObject 并播放
+  useEffect(() => {
+    if (!hasCam || !videoRef.current || !streamRef.current) return;
+    const video = videoRef.current;
+    video.srcObject = streamRef.current;
+    video.play().catch(() => { /* 浏览器可能阻止自动播放 */ });
+  }, [hasCam]);
 
   return { videoRef, hasCam, err };
 }
@@ -245,13 +259,37 @@ function useDrawCanvas() {
     ctx.fillRect(0, 0, w, h);
   }, []);
 
+  // 回放全部历史笔画（服务端重连时使用）
+  const replayAll = useCallback((strokes: any[]) => {
+    const ctx = ctxRef.current;
+    const w = wRef.current;
+    const h = hRef.current;
+    if (!ctx) return;
+    // 先清空
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, w, h);
+    // 逐笔画回放
+    for (const s of strokes) {
+      const points = s.points || [];
+      if (points.length < 2) continue;
+      ctx.strokeStyle = s.color || '#000000';
+      ctx.lineWidth = s.size || 4;
+      ctx.beginPath();
+      ctx.moveTo(points[0].x * w, points[0].y * h);
+      for (let i = 1; i < points.length; i++) {
+        ctx.lineTo(points[i].x * w, points[i].y * h);
+      }
+      ctx.stroke();
+    }
+  }, []);
+
   // 初始化时画白背景
   useEffect(() => {
     const timer = setTimeout(() => setup(), 100); // 延迟确保 DOM 就绪
     return () => clearTimeout(timer);
   }, [setup]);
 
-  return { canvasRef, drawStroke, clearCanvas, setup };
+  return { canvasRef, drawStroke, clearCanvas, setup, replayAll };
 }
 
 // ============================================================
@@ -299,6 +337,9 @@ export default function RoomPage() {
       },
       onClearCanvas: () => {
         drawCanvas.clearCanvas();
+      },
+      onReplay: (strokes) => {
+        drawCanvas.replayAll(strokes);
       },
     });
     setWsSend(() => sendCountdown);
@@ -422,21 +463,20 @@ export default function RoomPage() {
 
       {/* ---- 主区域 ---- */}
       <div style={S.main}>
-        {viewMode === 'camera' ? (
-          <div style={S.videoArea}>
-            {camera.hasCam ? (
-              <video ref={camera.videoRef} style={S.video} autoPlay muted playsInline />
-            ) : (
-              <div style={{ color: 'var(--text-tertiary)', fontSize: 16 }}>
-                {camera.err || '📷 摄像头未授权'}
-              </div>
-            )}
-          </div>
-        ) : (
-          <div style={{ ...S.videoArea, background: '#e8e8ed' }}>
-            <canvas ref={drawCanvas.canvasRef} style={{ width: '100%', height: '100%' }} />
-          </div>
-        )}
+        {/* 摄像头 — 始终渲染，避免切换时 srcObject 丢失 */}
+        <div style={{ ...S.videoArea, display: viewMode === 'camera' ? 'flex' : 'none' }}>
+          {camera.hasCam ? (
+            <video ref={camera.videoRef} style={S.video} autoPlay muted playsInline />
+          ) : (
+            <div style={{ color: 'var(--text-tertiary)', fontSize: 16 }}>
+              {camera.err || '📷 摄像头未授权'}
+            </div>
+          )}
+        </div>
+        {/* 画布 — 始终渲染，保留绘制内容且支持 replay */}
+        <div style={{ ...S.videoArea, background: '#e8e8ed', display: viewMode === 'canvas' ? 'flex' : 'none' }}>
+          <canvas ref={drawCanvas.canvasRef} style={{ width: '100%', height: '100%' }} />
+        </div>
         {timer.running && (
           <div style={{
             position: 'absolute', top: 20, right: 20,

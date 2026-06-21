@@ -95,7 +95,9 @@ export default function DrawPage() {
   const flushPending = useCallback(() => {
     if (pendingRef.current.length === 0 || !wsRef.current) return;
     wsRef.current.sendStroke(pendingRef.current, tool === 'eraser' ? '#ffffff' : color, size, tool);
-    pendingRef.current = [];
+    // 保留最后一个点作为下一批的起点，消除批次之间的断线
+    const last = pendingRef.current[pendingRef.current.length - 1];
+    pendingRef.current = [last];
   }, [color, size, tool]);
 
   const getPos = (e: React.PointerEvent): StrokePoint => {
@@ -121,13 +123,16 @@ export default function DrawPage() {
   };
 
   const onPointerDown = (e: React.PointerEvent) => {
+    const canvas = canvasRef.current!;
+    // 锁定指针：后续事件即使移出 canvas 也继续触发，防止笔画中断
+    canvas.setPointerCapture(e.pointerId);
+
     drawingRef.current = true;
     const pt = getPos(e);
     pendingRef.current = [pt];
     lastSentRef.current = Date.now();
 
     // 本地画一个点
-    const canvas = canvasRef.current!;
     const ctx = canvas.getContext('2d')!;
     const w = canvas.getBoundingClientRect().width;
     const h = canvas.getBoundingClientRect().height;
@@ -166,9 +171,11 @@ export default function DrawPage() {
     }
   };
 
-  const onPointerUp = () => {
+  const onPointerUp = (e: React.PointerEvent) => {
     drawingRef.current = false;
     flushPending();
+    // 释放指针锁定
+    canvasRef.current?.releasePointerCapture(e.pointerId);
   };
 
   const handleClear = () => {
@@ -205,7 +212,6 @@ export default function DrawPage() {
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
-          onPointerLeave={onPointerUp}
           onPointerCancel={onPointerUp}
         />
       </div>
