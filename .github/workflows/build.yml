@@ -3,14 +3,34 @@ name: Build & Package
 on:
   push:
     branches: [master, main]
+    tags: ['v*']
   pull_request:
     branches: [master, main]
   workflow_dispatch:
 
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
 jobs:
-  build-frontend:
-    name: Build Frontend
+  # ============================================================
+  # 编译前端 + Go 二进制 (三平台)
+  # ============================================================
+  build-binary:
+    name: Binary (${{ matrix.goos }}-${{ matrix.goarch }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ""
+          - goos: windows
+            goarch: amd64
+            ext: ".exe"
+          - goos: darwin
+            goarch: amd64
+            ext: ""
     steps:
       - uses: actions/checkout@v4
 
@@ -20,66 +40,26 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install dependencies
-        run: cd frontend && npm ci
-
-      - name: TypeScript check
-        run: cd frontend && npx tsc --noEmit
-
-      - name: Build
-        run: cd frontend && npm run build
-
-      - name: Upload frontend dist
-        uses: actions/upload-artifact@v4
-        with:
-          name: frontend-dist
-          path: frontend/dist/
-          retention-days: 1
-
-  build-backend:
-    name: Build Go Backend (${{ matrix.os }})
-    needs: build-frontend
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        include:
-          - os: ubuntu-latest
-            goos: linux
-            goarch: amd64
-            ext: ""
-          - os: windows-latest
-            goos: windows
-            goarch: amd64
-            ext: ".exe"
-          - os: macos-latest
-            goos: darwin
-            goarch: amd64
-            ext: ""
-
-    steps:
-      - uses: actions/checkout@v4
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npx tsc --noEmit
+          npm run build
 
       - uses: actions/setup-go@v5
         with:
           go-version: "1.21"
 
-      - name: Download frontend dist
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-dist
-          path: server/frontend/dist
+      - name: Copy dist for embedding
+        run: cp -r frontend/dist server/frontend/dist
 
-      - name: Download Go modules
-        run: cd server && go mod download
-
-      - name: Build binary
+      - name: Build Go binary
         run: |
           cd server
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o buzzer-server${{ matrix.ext }} .
 
-      - name: Package release
-        shell: bash
+      - name: Package (tar.gz)
         run: |
           mkdir -p release/frontend
           cp -r server/frontend/dist release/frontend/
@@ -87,9 +67,73 @@ jobs:
           cd release
           tar -czf ../buzzer-server-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz .
 
-      - name: Upload release artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: buzzer-server-${{ matrix.goos }}-${{ matrix.goarch }}
           path: buzzer-server-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
           retention-days: 7
+
+  # ============================================================
+  # Docker 镜像构建 + 推送到 GHCR
+  # ============================================================
+  build-docker:
+    name: Docker Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ============================================================
+  # 汇总: 创建 GitHub Release (仅 tag 触发)
+  # ============================================================
+  release:
+    name: Create Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-binary, build-docker]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: buzzer-server-*
+          merge-multiple: true
+          path: artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
