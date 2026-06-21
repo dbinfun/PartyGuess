@@ -41,6 +41,7 @@ type Room struct {
 	mu              sync.RWMutex
 	adminClients    map[*websocket.Conn]bool          // 管理端 WebSocket 连接
 	playerClients   map[*websocket.Conn]bool          // 玩家 WebSocket 连接
+	drawerClients   map[*websocket.Conn]bool          // 画手 WebSocket 连接
 	playerInfo      map[*websocket.Conn]*PlayerInfo   // 玩家连接 → 信息
 }
 
@@ -95,6 +96,7 @@ func createRoom(w http.ResponseWriter, r *http.Request) {
 		Players:       make([]PlayerInfo, 0),
 		adminClients:  make(map[*websocket.Conn]bool),
 		playerClients: make(map[*websocket.Conn]bool),
+		drawerClients: make(map[*websocket.Conn]bool),
 		playerInfo:    make(map[*websocket.Conn]*PlayerInfo),
 	}
 
@@ -220,11 +222,9 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if role == "admin" {
-		if secret != room.Secret {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
+	if (role == "admin" || role == "drawer") && secret != room.Secret {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -234,7 +234,8 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	if role == "admin" {
+	switch role {
+	case "admin":
 		room.mu.Lock()
 		room.adminClients[conn] = true
 		room.mu.Unlock()
@@ -295,7 +296,31 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		room.mu.Lock()
 		delete(room.adminClients, conn)
 		room.mu.Unlock()
-	} else {
+
+	case "drawer":
+		// 画手连接：注册并中继笔画到管理员
+		room.mu.Lock()
+		room.drawerClients[conn] = true
+		room.mu.Unlock()
+
+		for {
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				break
+			}
+			// 直接中继消息给所有管理客户端
+			room.mu.RLock()
+			for c := range room.adminClients {
+				c.WriteMessage(websocket.TextMessage, msg)
+			}
+			room.mu.RUnlock()
+		}
+
+		room.mu.Lock()
+		delete(room.drawerClients, conn)
+		room.mu.Unlock()
+
+	default:
 		// 玩家连接
 		var playerName string
 		var playerID string

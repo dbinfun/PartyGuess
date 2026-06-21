@@ -178,6 +178,83 @@ function useCamera() {
 }
 
 // ============================================================
+// 画布渲染 Hook（接收笔画并在 canvas 上绘制）
+// ============================================================
+
+function useDrawCanvas() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
+  const wRef = useRef(0);
+  const hRef = useRef(0);
+
+  // 初始化 + 自适应大小
+  const setup = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const parent = canvas.parentElement;
+    if (!parent) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = parent.clientWidth;
+    const h = parent.clientHeight;
+    if (w === 0 || h === 0) return;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    const ctx = canvas.getContext('2d')!;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctxRef.current = ctx;
+    wRef.current = w;
+    hRef.current = h;
+
+    // 白色背景
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, w, h);
+  }, []);
+
+  useEffect(() => {
+    setup();
+    const onResize = () => setup();
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [setup]);
+
+  const drawStroke = useCallback((points: { x: number; y: number }[], color: string, size: number) => {
+    const ctx = ctxRef.current;
+    const w = wRef.current;
+    const h = hRef.current;
+    if (!ctx || points.length < 2) return;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = size;
+    ctx.beginPath();
+    ctx.moveTo(points[0].x * w, points[0].y * h);
+    for (let i = 1; i < points.length; i++) {
+      ctx.lineTo(points[i].x * w, points[i].y * h);
+    }
+    ctx.stroke();
+  }, []);
+
+  const clearCanvas = useCallback(() => {
+    const ctx = ctxRef.current;
+    const w = wRef.current;
+    const h = hRef.current;
+    if (!ctx) return;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, w, h);
+  }, []);
+
+  // 初始化时画白背景
+  useEffect(() => {
+    const timer = setTimeout(() => setup(), 100); // 延迟确保 DOM 就绪
+    return () => clearTimeout(timer);
+  }, [setup]);
+
+  return { canvasRef, drawStroke, clearCanvas, setup };
+}
+
+// ============================================================
 // 主组件
 // ============================================================
 
@@ -191,10 +268,13 @@ export default function RoomPage() {
   const [buzzers, setBuzzers] = useState<BuzzerEntry[]>([]);
   const [players, setPlayers] = useState<PlayerInfo[]>([]);
   const [showQR, setShowQR] = useState(false);
+  const [showDrawQR, setShowDrawQR] = useState(false);
   const [showPlayers, setShowPlayers] = useState(false);
+  const [viewMode, setViewMode] = useState<'camera' | 'canvas'>('camera');
   const [wsSend, setWsSend] = useState<((active: boolean) => void) | null>(null);
 
   const camera = useCamera();
+  const drawCanvas = useDrawCanvas();
 
   const handleCountdownChange = useCallback((active: boolean) => {
     if (wsSend) wsSend(active);
@@ -202,6 +282,7 @@ export default function RoomPage() {
 
   const timer = useTimer(handleCountdownChange);
   const playUrl = `${location.protocol}//${location.host}/play/${roomId}?secret=${secret}`;
+  const drawUrl = `${location.protocol}//${location.host}/draw/${roomId}?secret=${secret}`;
 
   // WebSocket
   useEffect(() => {
@@ -212,6 +293,12 @@ export default function RoomPage() {
         setBuzzers(list);
         setPlayers(plist);
         if (!cdActive && timer.running) timer.stop();
+      },
+      onStroke: (points, color, size) => {
+        drawCanvas.drawStroke(points, color, size);
+      },
+      onClearCanvas: () => {
+        drawCanvas.clearCanvas();
       },
     });
     setWsSend(() => sendCountdown);
@@ -289,11 +376,26 @@ export default function RoomPage() {
 
         {/* 操作按钮 */}
         <div style={{ ...S.actionRow, paddingTop: 4 }}>
-          <button style={S.btnSecondary} onClick={() => setShowQR(true)}>📱 二维码</button>
-          <button style={S.btnSecondary} onClick={() => setShowPlayers(true)}>👥 在线 ({players.length})</button>
+          <button style={S.btnSecondary} onClick={() => setShowQR(true)}>📱 抢答码</button>
+          <button style={S.btnSecondary} onClick={() => setShowDrawQR(true)}>🎨 画布码</button>
         </div>
         <div style={{ ...S.actionRow, paddingTop: 0 }}>
-          <button style={S.btnDangerOutline} onClick={handleClear}>🗑 清空列表</button>
+          <button style={S.btnSecondary} onClick={() => setShowPlayers(true)}>👥 在线 ({players.length})</button>
+          <button style={S.btnDangerOutline} onClick={handleClear}>🗑 清空</button>
+        </div>
+
+        {/* 画布模式切换 */}
+        <div style={{ padding: '0 20px 8px' }}>
+          <div style={{
+            display: 'flex', background: 'var(--bg-tertiary)', borderRadius: 'var(--radius-sm)', padding: 3,
+          }}>
+            <button onClick={() => setViewMode('camera')} style={modeToggleCss(viewMode === 'camera')}>
+              📷 摄像
+            </button>
+            <button onClick={() => { setViewMode('canvas'); setTimeout(() => drawCanvas.setup(), 50); }} style={modeToggleCss(viewMode === 'canvas')}>
+              🎨 画布
+            </button>
+          </div>
         </div>
 
         {/* 抢答列表 */}
@@ -318,17 +420,23 @@ export default function RoomPage() {
         </div>
       </div>
 
-      {/* ---- 主区域：摄像头 ---- */}
+      {/* ---- 主区域 ---- */}
       <div style={S.main}>
-        <div style={S.videoArea}>
-          {camera.hasCam ? (
-            <video ref={camera.videoRef} style={S.video} autoPlay muted playsInline />
-          ) : (
-            <div style={{ color: 'var(--text-tertiary)', fontSize: 16 }}>
-              {camera.err || '📷 摄像头未授权'}
-            </div>
-          )}
-        </div>
+        {viewMode === 'camera' ? (
+          <div style={S.videoArea}>
+            {camera.hasCam ? (
+              <video ref={camera.videoRef} style={S.video} autoPlay muted playsInline />
+            ) : (
+              <div style={{ color: 'var(--text-tertiary)', fontSize: 16 }}>
+                {camera.err || '📷 摄像头未授权'}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div style={{ ...S.videoArea, background: '#e8e8ed' }}>
+            <canvas ref={drawCanvas.canvasRef} style={{ width: '100%', height: '100%' }} />
+          </div>
+        )}
         {timer.running && (
           <div style={{
             position: 'absolute', top: 20, right: 20,
@@ -348,6 +456,7 @@ export default function RoomPage() {
       </div>
 
       {showQR && <QRModal url={playUrl} onClose={() => setShowQR(false)} />}
+      {showDrawQR && <QRModal url={drawUrl} onClose={() => setShowDrawQR(false)} />}
       {showPlayers && <PlayersModal players={players} onClose={() => setShowPlayers(false)} />}
     </div>
   );
@@ -356,6 +465,14 @@ export default function RoomPage() {
 // ============================================================
 // 样式
 // ============================================================
+
+const modeToggleCss = (active: boolean): React.CSSProperties => ({
+  flex: 1, padding: '8px 0', fontSize: 13, fontWeight: 600, textAlign: 'center',
+  border: 'none', borderRadius: 8, cursor: 'pointer',
+  background: active ? 'var(--bg-secondary)' : 'transparent',
+  color: active ? 'var(--text-primary)' : 'var(--text-tertiary)',
+  boxShadow: active ? 'var(--shadow-sm)' : 'none',
+});
 
 const timerBtnCss = (active: boolean): React.CSSProperties => ({
   flex: '1 0 auto', padding: '8px 0', fontSize: 13, fontWeight: 600,

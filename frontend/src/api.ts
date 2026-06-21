@@ -55,6 +55,8 @@ export async function verifyRoom(roomId: string, secret: string): Promise<boolea
 export interface AdminWSCallbacks {
   onUpdate: (buzzers: BuzzerEntry[], players: PlayerInfo[]) => void;
   onState: (buzzers: BuzzerEntry[], players: PlayerInfo[], countdownActive: boolean) => void;
+  onStroke?: (points: {x:number;y:number}[], color: string, size: number, tool: string) => void;
+  onClearCanvas?: () => void;
 }
 
 export function connectAdmin(
@@ -70,6 +72,8 @@ export function connectAdmin(
       const data = JSON.parse(ev.data);
       if (data.type === 'update') cbs.onUpdate(data.buzzers || [], data.players || []);
       if (data.type === 'state') cbs.onState(data.buzzers || [], data.players || [], !!data.countdownActive);
+      if (data.type === 'stroke' && cbs.onStroke) cbs.onStroke(data.points || [], data.color, data.size, data.tool);
+      if (data.type === 'clearCanvas' && cbs.onClearCanvas) cbs.onClearCanvas();
     } catch { /* ignore */ }
   };
 
