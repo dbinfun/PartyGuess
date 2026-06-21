@@ -1,0 +1,47 @@
+version: "3.8"
+
+services:
+  # ============================================================
+  # Nginx — HTTPS 终结 + 反代
+  # ============================================================
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: buzzer-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      app:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - buzzer-net
+
+  # ============================================================
+  # 抢答服务器
+  # ============================================================
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: buzzer-server:latest
+    container_name: buzzer-app
+    environment:
+      - ADMIN_KEY=${ADMIN_KEY:-admin123}
+      - PORT=8080
+    expose:
+      - "8080"
+    restart: unless-stopped
+    networks:
+      - buzzer-net
+
+volumes:
+  nginx_logs:
+
+networks:
+  buzzer-net:
+    driver: bridge
