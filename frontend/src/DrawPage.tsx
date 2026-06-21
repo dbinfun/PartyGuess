@@ -9,10 +9,19 @@ import { verifyRoom } from './api';
 
 interface StrokePoint { x: number; y: number; } // 0~1 归一化坐标
 
-function connectDrawer(roomId: string) {
+function connectDrawer(roomId: string, onReplay?: (strokes: any[]) => void) {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${protocol}//${location.host}/ws/room?roomId=${roomId}&role=drawer&secret=` +
     new URLSearchParams(location.search).get('secret') || '');
+
+  ws.onmessage = (ev) => {
+    try {
+      const data = JSON.parse(ev.data);
+      if (data.type === 'replay' && onReplay) {
+        onReplay(data.strokes || []);
+      }
+    } catch { /* ignore */ }
+  };
 
   return {
     sendStroke: (points: StrokePoint[], color: string, size: number, tool: string) => {
@@ -61,12 +70,44 @@ export default function DrawPage() {
     verifyRoom(roomId, secret).then(setRoomValid).finally(() => setVerifying(false));
   }, [roomId, secret]);
 
+  // 回放历史笔画到本地画布
+  const drawReplay = useCallback((strokes: any[]) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const w = canvas.getBoundingClientRect().width;
+    const h = canvas.getBoundingClientRect().height;
+    if (w === 0 || h === 0) return;
+    // 清空
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, w, h);
+    // 逐笔画回放
+    for (const s of strokes) {
+      const points = s.points || [];
+      if (points.length < 2) continue;
+      ctx.strokeStyle = s.color || '#000000';
+      ctx.lineWidth = s.size || 4;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(points[0].x * w, points[0].y * h);
+      for (let i = 1; i < points.length; i++) {
+        ctx.lineTo(points[i].x * w, points[i].y * h);
+      }
+      ctx.stroke();
+    }
+  }, []);
+
   // 连接 WebSocket
   useEffect(() => {
     if (!roomValid) return;
-    wsRef.current = connectDrawer(roomId!);
-    return () => wsRef.current?.close();
-  }, [roomValid, roomId]);
+    // 延迟连接，确保 canvas 已初始化
+    const timer = setTimeout(() => {
+      wsRef.current = connectDrawer(roomId!, drawReplay);
+    }, 200);
+    return () => { clearTimeout(timer); wsRef.current?.close(); };
+  }, [roomValid, roomId, drawReplay]);
 
   // ---- 画布设置 ----
   useEffect(() => {

@@ -200,17 +200,40 @@ function useDrawCanvas() {
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   const wRef = useRef(0);
   const hRef = useRef(0);
+  const pendingReplayRef = useRef<any[] | null>(null);
+  const retryRef = useRef(0); // 重试计数
 
-  // 初始化 + 自适应大小
+  const applyPendingReplay = useCallback(() => {
+    const ctx = ctxRef.current;
+    const w = wRef.current;
+    const h = hRef.current;
+    if (!ctx || !pendingReplayRef.current) return;
+    const strokes = pendingReplayRef.current;
+    pendingReplayRef.current = null;
+    for (const s of strokes) {
+      const points = s.points || [];
+      if (points.length < 2) continue;
+      ctx.strokeStyle = s.color || '#000000';
+      ctx.lineWidth = s.size || 4;
+      ctx.beginPath();
+      ctx.moveTo(points[0].x * w, points[0].y * h);
+      for (let i = 1; i < points.length; i++) {
+        ctx.lineTo(points[i].x * w, points[i].y * h);
+      }
+      ctx.stroke();
+    }
+  }, []);
+
+  // 初始化（含重试，解决页面加载时布局未完成导致 clientWidth=0 的竞态）
   const setup = useCallback(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas) return false;
     const parent = canvas.parentElement;
-    if (!parent) return;
+    if (!parent) return false;
     const dpr = window.devicePixelRatio || 1;
     const w = parent.clientWidth;
     const h = parent.clientHeight;
-    if (w === 0 || h === 0) return;
+    if (w === 0 || h === 0) return false; // 布局未完成
     canvas.width = w * dpr;
     canvas.height = h * dpr;
     canvas.style.width = w + 'px';
@@ -223,13 +246,23 @@ function useDrawCanvas() {
     wRef.current = w;
     hRef.current = h;
 
-    // 白色背景
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, w, h);
-  }, []);
 
+    // 应用之前缓存的回放数据
+    applyPendingReplay();
+    return true;
+  }, [applyPendingReplay]);
+
+  // 首次挂载 + resize
   useEffect(() => {
-    setup();
+    // 用 rAF 确保浏览器完成布局后再初始化；失败则重试
+    const trySetup = () => {
+      if (setup()) { retryRef.current = 0; return; }
+      if (retryRef.current < 20) { retryRef.current++; requestAnimationFrame(trySetup); }
+    };
+    requestAnimationFrame(trySetup);
+
     const onResize = () => setup();
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
@@ -259,12 +292,17 @@ function useDrawCanvas() {
     ctx.fillRect(0, 0, w, h);
   }, []);
 
-  // 回放全部历史笔画（服务端重连时使用）
+  // 回放全部历史笔画（服务端重连时使用）；画布未就绪则暂存
   const replayAll = useCallback((strokes: any[]) => {
+    if (!strokes || strokes.length === 0) return;
     const ctx = ctxRef.current;
+    if (!ctx) {
+      // 画布尚未初始化，暂存等待 setup 完成后回放
+      pendingReplayRef.current = strokes;
+      return;
+    }
     const w = wRef.current;
     const h = hRef.current;
-    if (!ctx) return;
     // 先清空
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, w, h);
@@ -282,12 +320,6 @@ function useDrawCanvas() {
       ctx.stroke();
     }
   }, []);
-
-  // 初始化时画白背景
-  useEffect(() => {
-    const timer = setTimeout(() => setup(), 100); // 延迟确保 DOM 就绪
-    return () => clearTimeout(timer);
-  }, [setup]);
 
   return { canvasRef, drawStroke, clearCanvas, setup, replayAll };
 }
@@ -433,7 +465,7 @@ export default function RoomPage() {
             <button onClick={() => setViewMode('camera')} style={modeToggleCss(viewMode === 'camera')}>
               📷 摄像
             </button>
-            <button onClick={() => { setViewMode('canvas'); setTimeout(() => drawCanvas.setup(), 50); }} style={modeToggleCss(viewMode === 'canvas')}>
+            <button onClick={() => setViewMode('canvas')} style={modeToggleCss(viewMode === 'canvas')}>
               🎨 画布
             </button>
           </div>
@@ -463,8 +495,13 @@ export default function RoomPage() {
 
       {/* ---- 主区域 ---- */}
       <div style={S.main}>
-        {/* 摄像头 — 始终渲染，避免切换时 srcObject 丢失 */}
-        <div style={{ ...S.videoArea, display: viewMode === 'camera' ? 'flex' : 'none' }}>
+        {/* 摄像头层 — 始终渲染，opacity 切换避免 srcObject 丢失 */}
+        <div style={{
+          ...S.videoArea, position: 'absolute', inset: 0,
+          zIndex: viewMode === 'camera' ? 1 : 0,
+          opacity: viewMode === 'camera' ? 1 : 0,
+          pointerEvents: viewMode === 'camera' ? 'auto' : 'none',
+        }}>
           {camera.hasCam ? (
             <video ref={camera.videoRef} style={S.video} autoPlay muted playsInline />
           ) : (
@@ -473,8 +510,14 @@ export default function RoomPage() {
             </div>
           )}
         </div>
-        {/* 画布 — 始终渲染，保留绘制内容且支持 replay */}
-        <div style={{ ...S.videoArea, background: '#e8e8ed', display: viewMode === 'canvas' ? 'flex' : 'none' }}>
+        {/* 画布层 — 始终渲染，保持尺寸让 setup/replay 正常工作 */}
+        <div style={{
+          ...S.videoArea, position: 'absolute', inset: 0,
+          background: '#e8e8ed',
+          zIndex: viewMode === 'canvas' ? 1 : 0,
+          opacity: viewMode === 'canvas' ? 1 : 0,
+          pointerEvents: viewMode === 'canvas' ? 'auto' : 'none',
+        }}>
           <canvas ref={drawCanvas.canvasRef} style={{ width: '100%', height: '100%' }} />
         </div>
         {timer.running && (
