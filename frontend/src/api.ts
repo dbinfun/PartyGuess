@@ -6,12 +6,6 @@ export interface BuzzerEntry {
   userId: string;
 }
 
-export interface RoomInfo {
-  roomId: string;
-  createdAt: number;
-  buzzers: BuzzerEntry[];
-}
-
 // ============================================================
 // HTTP API
 // ============================================================
@@ -21,14 +15,11 @@ export async function createRoom(adminKey: string): Promise<{ roomId: string; se
     method: 'POST',
     headers: { 'X-Admin-Key': adminKey },
   });
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(err);
-  }
+  if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
-export async function getRoomInfo(roomId: string, secret: string): Promise<RoomInfo> {
+export async function getRoomInfo(roomId: string, secret: string) {
   const res = await fetch(`${BASE}/api/rooms/info?roomId=${roomId}&secret=${secret}`);
   if (!res.ok) throw new Error('room not found');
   return res.json();
@@ -52,62 +43,86 @@ export async function verifyRoom(roomId: string, secret: string): Promise<boolea
 }
 
 // ============================================================
-// WebSocket
+// Admin WebSocket
 // ============================================================
+
+export interface AdminWSCallbacks {
+  onUpdate: (buzzers: BuzzerEntry[]) => void;
+  onState: (buzzers: BuzzerEntry[], countdownActive: boolean) => void;
+}
 
 export function connectAdmin(
   roomId: string,
   secret: string,
-  onUpdate: (buzzers: BuzzerEntry[]) => void,
-): () => void {
+  cbs: AdminWSCallbacks,
+): { sendCountdown: (active: boolean) => void; close: () => void } {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const host = location.host;
-  const ws = new WebSocket(`${protocol}//${host}/ws/room?roomId=${roomId}&role=admin&secret=${secret}`);
+  const ws = new WebSocket(`${protocol}//${location.host}/ws/room?roomId=${roomId}&role=admin&secret=${secret}`);
 
   ws.onmessage = (ev) => {
     try {
       const data = JSON.parse(ev.data);
-      if (data.type === 'state' || data.type === 'update') {
-        onUpdate(data.buzzers || []);
-      }
+      if (data.type === 'update') cbs.onUpdate(data.buzzers || []);
+      if (data.type === 'state') cbs.onState(data.buzzers || [], !!data.countdownActive);
     } catch { /* ignore */ }
   };
 
-  ws.onclose = () => {
-    // 断线 3 秒后重连
-    setTimeout(() => connectAdmin(roomId, secret, onUpdate), 3000);
-  };
+  ws.onclose = () => setTimeout(() => connectAdmin(roomId, secret, cbs), 3000);
 
-  return () => ws.close();
+  return {
+    sendCountdown: (active: boolean) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'countdown', active }));
+      }
+    },
+    close: () => ws.close(),
+  };
+}
+
+// ============================================================
+// Player WebSocket
+// ============================================================
+
+export interface PlayerWSCallbacks {
+  onJoined: (userId: string) => void;
+  onBuzzAck: (success: boolean, error?: string) => void;
+  onCountdown: (active: boolean) => void;
 }
 
 export function connectPlayer(
   roomId: string,
   name: string,
-  onOpen: (userId: string) => void,
-  onBuzzAck: () => void,
+  cbs: PlayerWSCallbacks,
 ): { sendBuzz: () => void; close: () => void } {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const host = location.host;
-  const ws = new WebSocket(`${protocol}//${host}/ws/room?roomId=${roomId}&role=player`);
+  const ws = new WebSocket(`${protocol}//${location.host}/ws/room?roomId=${roomId}&role=player`);
 
-  ws.onopen = () => {
-    ws.send(JSON.stringify({ type: 'join', name }));
-  };
+  ws.onopen = () => ws.send(JSON.stringify({ type: 'join', name }));
 
   ws.onmessage = (ev) => {
     try {
       const data = JSON.parse(ev.data);
-      if (data.type === 'joined') {
-        onOpen(data.userId);
-      } else if (data.type === 'buzzAck') {
-        onBuzzAck();
+      switch (data.type) {
+        case 'joined':
+          cbs.onJoined(data.userId);
+          if (data.countdownActive !== undefined) cbs.onCountdown(!!data.countdownActive);
+          break;
+        case 'buzzAck':
+          cbs.onBuzzAck(!!data.success, data.error);
+          break;
+        case 'countdown':
+          cbs.onCountdown(!!data.countdownActive);
+          break;
       }
     } catch { /* ignore */ }
   };
 
   return {
-    sendBuzz: () => ws.send(JSON.stringify({ type: 'buzz' })),
+    sendBuzz: () => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'buzz' }));
+      }
+    },
     close: () => ws.close(),
   };
 }

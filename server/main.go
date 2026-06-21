@@ -26,12 +26,14 @@ type BuzzerEntry struct {
 }
 
 type Room struct {
-	ID        string        `json:"id"`
-	Secret    string        `json:"secret"` // 随机字符串，用于 URL 安全
-	CreatedAt int64         `json:"createdAt"`
-	Buzzers   []BuzzerEntry `json:"buzzers"`
-	mu        sync.RWMutex
-	clients   map[*websocket.Conn]bool // 管理端 WebSocket 连接
+	ID              string        `json:"id"`
+	Secret          string        `json:"secret"` // 随机字符串，用于 URL 安全
+	CreatedAt       int64         `json:"createdAt"`
+	Buzzers         []BuzzerEntry `json:"buzzers"`
+	CountdownActive bool          `json:"countdownActive"`
+	mu              sync.RWMutex
+	adminClients    map[*websocket.Conn]bool // 管理端 WebSocket 连接
+	playerClients   map[*websocket.Conn]bool // 玩家 WebSocket 连接
 }
 
 type RoomStore struct {
@@ -78,11 +80,12 @@ func createRoom(w http.ResponseWriter, r *http.Request) {
 	}
 
 	room := &Room{
-		ID:        uuid.New().String()[:8],
-		Secret:    randomString(12),
-		CreatedAt: time.Now().UnixMilli(),
-		Buzzers:   make([]BuzzerEntry, 0),
-		clients:   make(map[*websocket.Conn]bool),
+		ID:            uuid.New().String()[:8],
+		Secret:        randomString(12),
+		CreatedAt:     time.Now().UnixMilli(),
+		Buzzers:       make([]BuzzerEntry, 0),
+		adminClients:  make(map[*websocket.Conn]bool),
+		playerClients: make(map[*websocket.Conn]bool),
 	}
 
 	store.mu.Lock()
@@ -208,13 +211,10 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if role == "admin" {
-		// 管理员需要 secret
 		if secret != room.Secret {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-	} else {
-		// 玩家只需要房间存在（进一步校验可行）
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -226,32 +226,80 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 	if role == "admin" {
 		room.mu.Lock()
-		room.clients[conn] = true
+		room.adminClients[conn] = true
 		room.mu.Unlock()
 
 		// 发送当前状态
 		room.mu.RLock()
 		sendJSON(conn, map[string]interface{}{
-			"type":    "state",
-			"buzzers": room.Buzzers,
+			"type":             "state",
+			"buzzers":          room.Buzzers,
+			"countdownActive":  room.CountdownActive,
 		})
 		room.mu.RUnlock()
 
-		// 保持连接，直到断开
+		// 读取管理员消息（倒计时控制等）
 		for {
-			_, _, err := conn.ReadMessage()
+			_, msg, err := conn.ReadMessage()
 			if err != nil {
 				break
+			}
+
+			var data map[string]interface{}
+			if err := json.Unmarshal(msg, &data); err != nil {
+				continue
+			}
+
+			switch data["type"] {
+			case "countdown":
+				active, _ := data["active"].(bool)
+				room.mu.Lock()
+				room.CountdownActive = active
+				// 清空上一轮抢答
+				if active {
+					room.Buzzers = make([]BuzzerEntry, 0)
+				}
+				room.mu.Unlock()
+
+				log.Printf("房间 %s 倒计时: %v", roomID, active)
+
+				// 广播给所有玩家
+				broadcastToPlayers(room, map[string]interface{}{
+					"type":             "countdown",
+					"countdownActive":  active,
+				})
+
+				// 同步给管理员
+				room.mu.RLock()
+				sendJSON(conn, map[string]interface{}{
+					"type":             "state",
+					"buzzers":          room.Buzzers,
+					"countdownActive":  room.CountdownActive,
+				})
+				room.mu.RUnlock()
 			}
 		}
 
 		room.mu.Lock()
-		delete(room.clients, conn)
+		delete(room.adminClients, conn)
 		room.mu.Unlock()
 	} else {
 		// 玩家连接
 		var playerName string
 		var playerID string
+
+		room.mu.Lock()
+		room.playerClients[conn] = true
+		// 发送当前倒计时状态
+		cdActive := room.CountdownActive
+		room.mu.Unlock()
+
+		if cdActive {
+			sendJSON(conn, map[string]interface{}{
+				"type":            "countdown",
+				"countdownActive": true,
+			})
+		}
 
 		for {
 			_, msg, err := conn.ReadMessage()
@@ -269,16 +317,24 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				playerName, _ = data["name"].(string)
 				playerID = uuid.New().String()
 				sendJSON(conn, map[string]interface{}{
-					"type":   "joined",
-					"userId": playerID,
+					"type":            "joined",
+					"userId":          playerID,
+					"countdownActive": room.CountdownActive,
 				})
 				log.Printf("玩家 %s 加入房间 %s", playerName, roomID)
 
 			case "buzz":
-				// 处理抢答
 				room.mu.Lock()
+				if !room.CountdownActive {
+					room.mu.Unlock()
+					sendJSON(conn, map[string]interface{}{
+						"type":    "buzzAck",
+						"success": false,
+						"error":   "当前不在抢答时间",
+					})
+					continue
+				}
 				if len(room.Buzzers) >= 10 {
-					// 移除最早的一个
 					room.Buzzers = room.Buzzers[1:]
 				}
 				room.Buzzers = append(room.Buzzers, BuzzerEntry{
@@ -289,17 +345,19 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				buzzers := room.Buzzers
 				room.mu.Unlock()
 
-				// 通知当前玩家
 				sendJSON(conn, map[string]interface{}{
 					"type":    "buzzAck",
 					"success": true,
 				})
 
-				// 广播给管理员
 				broadcastToAdmin(room)
 				_ = buzzers
 			}
 		}
+
+		room.mu.Lock()
+		delete(room.playerClients, conn)
+		room.mu.Unlock()
 	}
 }
 
@@ -315,8 +373,8 @@ func sendJSON(conn *websocket.Conn, v interface{}) {
 func broadcastToAdmin(room *Room) {
 	room.mu.RLock()
 	buzzers := room.Buzzers
-	clients := make([]*websocket.Conn, 0, len(room.clients))
-	for c := range room.clients {
+	clients := make([]*websocket.Conn, 0, len(room.adminClients))
+	for c := range room.adminClients {
 		clients = append(clients, c)
 	}
 	room.mu.RUnlock()
@@ -327,6 +385,20 @@ func broadcastToAdmin(room *Room) {
 	}
 	data, _ := json.Marshal(update)
 
+	for _, c := range clients {
+		c.WriteMessage(websocket.TextMessage, data)
+	}
+}
+
+func broadcastToPlayers(room *Room, msg map[string]interface{}) {
+	room.mu.RLock()
+	clients := make([]*websocket.Conn, 0, len(room.playerClients))
+	for c := range room.playerClients {
+		clients = append(clients, c)
+	}
+	room.mu.RUnlock()
+
+	data, _ := json.Marshal(msg)
 	for _, c := range clients {
 		c.WriteMessage(websocket.TextMessage, data)
 	}

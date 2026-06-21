@@ -1,36 +1,32 @@
 import { Component } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
+import { ThemeProvider } from './theme';
 import AdminPage from './AdminPage';
 import RoomPage from './RoomPage';
 import PlayPage from './PlayPage';
 
-// ---- Error Boundary：捕获渲染期崩溃，避免白屏 ----
+// ---- Error Boundary ----
 
-interface EBState {
-  hasError: boolean;
-  error: Error | null;
-}
+interface EBState { hasError: boolean; error: Error | null; }
 
 class ErrorBoundary extends Component<{ children: React.ReactNode }, EBState> {
   state: EBState = { hasError: false, error: null };
-
-  static getDerivedStateFromError(error: Error) {
-    return { hasError: true, error };
-  }
+  static getDerivedStateFromError(error: Error) { return { hasError: true, error }; }
 
   render() {
     if (this.state.hasError) {
       return (
         <div style={{
           display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-          height: '100vh', fontFamily: 'sans-serif', color: '#333', textAlign: 'center', padding: 20,
+          height: '100vh', fontFamily: 'var(--font-stack)', color: 'var(--text-primary)',
+          background: 'var(--bg-primary)', textAlign: 'center', padding: 20,
         }}>
-          <h1 style={{ fontSize: 24, marginBottom: 12 }}>⚠️ 页面出错了</h1>
-          <p style={{ color: '#e74c3c', fontSize: 14, maxWidth: 500, wordBreak: 'break-all' }}>
+          <h1 style={{ fontSize: 24, fontWeight: 600, marginBottom: 8 }}>⚠️ 页面出错了</h1>
+          <p style={{ color: 'var(--text-secondary)', fontSize: 14, maxWidth: 480, wordBreak: 'break-all', marginBottom: 24 }}>
             {this.state.error?.message || '未知错误'}
           </p>
           <button
-            style={{ marginTop: 20, padding: '10px 28px', border: 'none', borderRadius: 8, background: '#667eea', color: '#fff', cursor: 'pointer' }}
+            style={{ padding: '10px 28px', border: 'none', borderRadius: 999, background: 'var(--accent)', color: '#fff', fontSize: 15, fontWeight: 500 }}
             onClick={() => { this.setState({ hasError: false, error: null }); window.location.href = '/admin'; }}
           >
             返回首页
@@ -42,17 +38,19 @@ class ErrorBoundary extends Component<{ children: React.ReactNode }, EBState> {
   }
 }
 
-// ---- 路由 ----
+// ---- App ----
 
 export default function App() {
   return (
-    <ErrorBoundary>
-      <Routes>
-        <Route path="/admin" element={<AdminPage />} />
-        <Route path="/admin/room/:roomId" element={<RoomPage />} />
-        <Route path="/play/:roomId" element={<PlayPage />} />
-        <Route path="*" element={<Navigate to="/admin" replace />} />
-      </Routes>
-    </ErrorBoundary>
+    <ThemeProvider>
+      <ErrorBoundary>
+        <Routes>
+          <Route path="/admin" element={<AdminPage />} />
+          <Route path="/admin/room/:roomId" element={<RoomPage />} />
+          <Route path="/play/:roomId" element={<PlayPage />} />
+          <Route path="*" element={<Navigate to="/admin" replace />} />
+        </Routes>
+      </ErrorBoundary>
+    </ThemeProvider>
   );
 }
