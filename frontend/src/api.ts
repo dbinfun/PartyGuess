@@ -48,6 +48,44 @@ export async function verifyRoom(roomId: string, secret: string): Promise<boolea
   }
 }
 
+export interface RoomSummary {
+  id: string;
+  createdAt: number;
+  playerCount: number;
+  buzzerCount: number;
+  adminConnected: boolean;
+  drawerConnected: boolean;
+}
+
+export async function listRooms(adminKey: string): Promise<{ rooms: RoomSummary[]; total: number }> {
+  const res = await fetch(`${BASE}/api/admin/rooms`, {
+    headers: { 'X-Admin-Key': adminKey },
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function deleteRooms(adminKey: string, roomIds: string[] | null): Promise<{ deleted: number }> {
+  const body = roomIds === null
+    ? JSON.stringify({ all: true })
+    : JSON.stringify({ roomIds });
+  const res = await fetch(`${BASE}/api/admin/rooms`, {
+    method: 'DELETE',
+    headers: { 'X-Admin-Key': adminKey, 'Content-Type': 'application/json' },
+    body,
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function shutdownServer(adminKey: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/admin/shutdown`, {
+    method: 'POST',
+    headers: { 'X-Admin-Key': adminKey },
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
 // ============================================================
 // Admin WebSocket
 // ============================================================

@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom';
 import { ThemeProvider } from './theme';
 import AdminPage from './AdminPage';
 import RoomPage from './RoomPage';
+import RoomManagePage from './RoomManagePage';
 import PlayPage from './PlayPage';
 import DrawPage from './DrawPage';
 
@@ -48,6 +49,7 @@ export default function App() {
         <Routes>
           <Route path="/admin" element={<AdminPage />} />
           <Route path="/admin/room/:roomId" element={<RoomPage />} />
+          <Route path="/admin/rooms" element={<RoomManagePage />} />
           <Route path="/play/:roomId" element={<PlayPage />} />
           <Route path="/draw/:roomId" element={<DrawPage />} />
           <Route path="*" element={<Navigate to="/admin" replace />} />

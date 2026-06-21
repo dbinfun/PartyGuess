@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/rs/cors"
@@ -62,6 +65,25 @@ func main() {
 	// WebSocket
 	mux.HandleFunc("/ws/room", wsHandler)
 
+	// 管理员管理 API
+	mux.HandleFunc("/api/admin/rooms", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			listAdminRooms(w, r)
+		case http.MethodDelete:
+			deleteAdminRooms(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/admin/shutdown", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			shutdownServer(w, r)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	})
+
 	// 静态文件 + SPA
 	staticDir := findStaticDir()
 	if staticDir != "" {
@@ -87,5 +109,29 @@ func main() {
 	}
 
 	log.Printf("🚀 服务器启动在 http://localhost:%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, handler))
+
+	srv = &http.Server{
+		Addr:    ":" + port,
+		Handler: handler,
+	}
+
+	// 监听系统信号，实现优雅关闭
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-quit
+		log.Println("收到系统信号，正在优雅关闭...")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("服务器关闭错误: %v", err)
+		}
+	}()
+
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("服务器启动失败: %v", err)
+	}
+
+	log.Println("服务器已关闭")
 }

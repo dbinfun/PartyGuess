@@ -61,6 +61,14 @@ export default function AdminPage() {
         <p style={styles.hint}>
           输入 Admin Key 创建抢答房间
         </p>
+
+        <p
+          onClick={() => navigate('/admin/rooms')}
+          style={styles.manageLink}
+          title="房间管理"
+        >
+          ⚙️
+        </p>
       </div>
     </div>
   );
@@ -120,5 +128,10 @@ const styles: Record<string, React.CSSProperties> = {
   },
   hint: {
     marginTop: 20, fontSize: 13, color: 'var(--text-tertiary)',
+  },
+  manageLink: {
+    marginTop: 24, fontSize: 18, color: 'var(--text-tertiary)',
+    cursor: 'pointer', userSelect: 'none' as const,
+    opacity: 0.3, transition: 'opacity 0.2s',
   },
 };

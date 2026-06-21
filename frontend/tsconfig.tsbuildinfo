@@ -1,1 +1,1 @@
-{"root":["./src/adminpage.tsx","./src/app.tsx","./src/drawpage.tsx","./src/playpage.tsx","./src/roompage.tsx","./src/api.ts","./src/main.tsx","./src/theme.tsx"],"version":"5.9.3"}
+{"root":["./src/adminpage.tsx","./src/app.tsx","./src/drawpage.tsx","./src/playpage.tsx","./src/roommanagepage.tsx","./src/roompage.tsx","./src/api.ts","./src/main.tsx","./src/theme.tsx"],"version":"5.9.3"}
